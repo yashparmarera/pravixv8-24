@@ -334,7 +334,8 @@ export default function OnboardingForm() {
   const [authRequired, setAuthRequired] = useState(false);
   const [didResumeSession, setDidResumeSession] = useState(false);
   const [isAuthenticatedUser, setIsAuthenticatedUser] = useState(false);
-  const [authPassword, setAuthPassword] = useState("");
+  // Store the password used at account creation for fallback sign-in
+  const [authPassword, setAuthPassword] = useState<string>("");
   const [emailVerificationCode, setEmailVerificationCode] = useState("");
   const [emailVerificationSent, setEmailVerificationSent] = useState(false);
   const [emailVerified, setEmailVerified] = useState(false);
@@ -574,25 +575,55 @@ export default function OnboardingForm() {
     setEmailVerificationMessage(null);
 
     try {
+      // Always use the password from account creation for fallback sign-in
+      const passwordToUse = authPassword ?? (typeof answers.password === "string" ? answers.password : "");
+      if (!passwordToUse) {
+        throw new Error("Password is required for verification.");
+      }
       const verifyResponse = await fetch("/api/auth/verify-email", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: emailValue, token }),
+        body: JSON.stringify({ 
+          email: emailValue, 
+          token, 
+          password: passwordToUse 
+        }),
       });
 
-      const verifyPayload = (await verifyResponse.json().catch(() => ({}))) as { error?: string };
+      const verifyPayload = (await verifyResponse.json().catch(() => ({}))) as { 
+        error?: string; 
+        session?: { access_token?: string; refresh_token?: string } 
+      };
+      
       if (!verifyResponse.ok) {
-        throw new Error(verifyPayload.error ?? "Verification failed.");
+        const errorMsg = verifyPayload.error ?? "Verification failed.";
+        
+        // If it's already verified, we can try to sign in directly as a fallback
+        if (errorMsg === "Email already verified") {
+          const supabase = getSupabaseBrowserClient();
+          const { error: signInError } = await supabase.auth.signInWithPassword({
+            email: emailValue,
+            password: passwordToUse,
+          });
+
+          if (signInError) {
+            throw signInError;
+          }
+        } else {
+          throw new Error(errorMsg);
+        }
       }
 
-      const supabase = getSupabaseBrowserClient();
-      const { error: signInError } = await supabase.auth.signInWithPassword({
-        email: emailValue,
-        password: authPassword,
-      });
+      if (verifyPayload.session?.access_token && verifyPayload.session.refresh_token) {
+        const supabase = getSupabaseBrowserClient();
+        const { error: sessionError } = await supabase.auth.setSession({
+          access_token: verifyPayload.session.access_token,
+          refresh_token: verifyPayload.session.refresh_token,
+        });
 
-      if (signInError) {
-        throw signInError;
+        if (sessionError) {
+          throw sessionError;
+        }
       }
 
       setEmailVerified(true);

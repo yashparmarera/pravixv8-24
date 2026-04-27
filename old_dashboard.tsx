@@ -26,13 +26,6 @@ import {
   Briefcase,
   ArrowUpRight,
   X,
-  Bot,
-  MessageCircle,
-  Lightbulb,
-  Zap,
-  CheckCircle2,
-  ArrowRight,
-  Quote,
 } from "lucide-react";
 import {
   Area,
@@ -55,7 +48,6 @@ import RequireAuth from "@/components/RequireAuth";
 import AgentAdvisorPanel from "@/components/AgentAdvisorPanel";
 import ExecutiveIntelligencePanel from "@/components/ExecutiveIntelligencePanel";
 import HoldingsAnalyzerPanel from "@/components/HoldingsAnalyzerPanel";
-import LoadingSpinner from "@/components/LoadingSpinner";
 import { DashboardSectionCard, StatCard, StatusBadge } from "@/components/dashboard/DashboardPrimitives";
 import type { AgentStructuredAdvice, DashboardIntelligenceSnapshot, DashboardModuleKey } from "@/lib/agent/types";
 import { getSupabaseBrowserClient } from "@/lib/supabase/client";
@@ -161,16 +153,25 @@ type AgentChatPayload = {
 type AgentChatReplyPayload = {
   ok?: boolean;
   reply?: string;
-  raw?: string;
   error?: string;
+  isSimpleAnswer?: boolean;
+  structured?: {
+    recommendation?: string;
+    reason?: string;
+    nextAction?: string;
+    intro?: string;
+  };
 };
 
 type FollowUpQaItem = {
   id: string;
   question: string;
   answer: string;
-  raw?: string;
-  isSimple?: boolean;
+  isSimple: boolean;
+  recommendation: string;
+  reason: string;
+  nextAction: string;
+  intro: string;
 };
 
 type DashboardHorizon = "1y" | "2y" | "3y" | "custom";
@@ -196,441 +197,6 @@ type ScenarioCard = {
   gainPct: number;
   tone: InsightTone;
 };
-
-// Beautiful formatted response component - parses comma-separated text into cards
-// mode: 'chat' for ai-follow-up-question, 'plan' for My Easy Money Plan section
-function FormattedResponse({ text, mode = 'chat' }: { text: string; mode?: 'chat' | 'plan' }) {
-  if (!text) return null;
-
-  // Parse comma-separated text into structured sections
-  const parseContent = (input: string, parseMode: 'chat' | 'plan') => {
-    // Detect if input is JSON and extract readable text
-    let processedInput = input.trim();
-    
-    // Try to extract readable content from JSON structure
-    try {
-      if (processedInput.startsWith('{') && processedInput.includes('"intro"')) {
-        // Extract key fields from AI structured response
-        const introMatch = processedInput.match(/"intro"\s*:\s*"([^"]+)"/);
-        const recommendationMatch = processedInput.match(/"recommendation"\s*:\s*"([^"]+)"/);
-        const reasonMatch = processedInput.match(/"reason"\s*:\s*"([^"]+)"/);
-        const nextActionMatch = processedInput.match(/"nextAction"\s*:\s*"([^"]+)"/);
-        
-        const parts = [
-          introMatch?.[1],
-          recommendationMatch?.[1],
-          reasonMatch?.[1],
-          nextActionMatch?.[1]
-        ].filter(Boolean);
-        
-        if (parts.length > 0) {
-          processedInput = parts.join('. ');
-        }
-      }
-    } catch {
-      // If JSON parsing fails, continue with raw input
-    }
-    
-    // Clean input
-    let cleaned = processedInput
-      .replace(/"[a-zA-Z0-9_]+":\s*/g, '')
-      .replace(/[{}[\]]/g, '')
-      .replace(/"/g, '')
-      .trim();
-
-    // Mode-specific splitting
-    let segments: string[];
-    if (parseMode === 'plan') {
-      // For dashboard plan: extract the main advisory sentence first
-      const advisoryMatch = cleaned.match(/(Invest|Allocate|Save|You're)\s+[^.]*?(?:₹[\d,.]+)[^.]*?(?:each|every|per)[^.]*?month[^.]*?(?:using|with|via)[^.]*/i);
-      if (advisoryMatch) {
-        // Return just the advisory as a single section for plan mode
-        return { 
-          sections: [{ 
-            icon: '💡', 
-            title: 'Your Plan', 
-            items: [{ text: advisoryMatch[0], isParagraph: true }] 
-          }], 
-          summaryData: { goal: '', timeline: '', monthlySip: '', returns: '', advisory: advisoryMatch[0] } 
-        };
-      }
-      // Fallback: simpler split
-      segments = cleaned.split(/,\s*(?=[A-Z][a-z]+:|Step\s+\d+|Allocation:|Time\s+horizon:|Expected)/);
-    } else {
-      // For chat: detailed step-by-step parsing
-      segments = cleaned.split(/,\s*(?=[A-Z][a-z]+:|\d+\)|Step\s+\d+|💡|📊|💰|📈|🎯|✓|🏦)/);
-    }
-    
-    const sections: { icon: string; title: string; items: { text: string; subItems?: string[]; isParagraph?: boolean }[]; isAction?: boolean }[] = [];
-    let currentSection: { icon: string; title: string; items: { text: string; subItems?: string[]; isParagraph?: boolean }[]; isAction?: boolean } | null = null;
-    let currentAllocation: { category: string; icon: string; return: string; funds: string[]; purpose: string; amount?: string } | null = null;
-    
-    // Summary data for top card
-    let summaryData = {
-      goal: '',
-      timeline: '',
-      monthlySip: '',
-      returns: '',
-      advisory: '' // Expert advisory text with split breakdown
-    };
-
-    // Helper to flush current allocation
-    const flushAllocation = () => {
-      if (currentAllocation && currentSection) {
-        currentSection.items.push({
-          text: `${currentAllocation.icon} ${currentAllocation.category}`,
-          subItems: [
-            `📊 ${currentAllocation.return}`,
-            ...(currentAllocation.amount ? [`💰 ${currentAllocation.amount}`] : []),
-            ...(currentAllocation.funds.length ? [`🏦 ${currentAllocation.funds.join(' • ')}`] : []),
-            ...(currentAllocation.purpose ? [`💡 ${currentAllocation.purpose}`] : [])
-          ].filter(Boolean)
-        });
-        currentAllocation = null;
-      }
-    };
-
-    segments.forEach((segment) => {
-      const trimmed = segment.trim();
-      if (!trimmed) return;
-
-      // Mode-specific: Plan mode uses simpler section titles
-      if (parseMode === 'plan') {
-        // For plan mode: detect key section headers
-        if (trimmed.match(/^Allocation:/i)) {
-          if (currentSection) sections.push(currentSection);
-          currentSection = { icon: '📊', title: 'Your Allocation', items: [{ text: `📊 ${trimmed.replace(/^Allocation:\s*/i, '')}`, isParagraph: true }] };
-          return;
-        }
-        if (trimmed.match(/^Time horizon:/i)) {
-          currentSection?.items.push({ text: `⏱️ ${trimmed}`, isParagraph: true });
-          return;
-        }
-        if (trimmed.match(/^Expected portfolio/i)) {
-          currentSection?.items.push({ text: `📈 ${trimmed}`, isParagraph: true });
-          return;
-        }
-      }
-
-      // Detect Step patterns (for both modes)
-      const stepMatch = trimmed.match(/^(?:Step\s+(\d+)|(\d+)\))[:.]?\s*(.+)/i);
-      if (stepMatch) {
-        flushAllocation();
-        if (currentSection) sections.push(currentSection);
-        
-        const stepNum = stepMatch[1] || stepMatch[2];
-        const stepTitle = stepMatch[3];
-        
-        let icon = '📋';
-        if (stepTitle.toLowerCase().includes('invest') || stepTitle.toLowerCase().includes('much') || stepTitle.toLowerCase().includes('amount')) icon = '💰';
-        if (stepTitle.toLowerCase().includes('split') || stepTitle.toLowerCase().includes('portfolio') || stepTitle.toLowerCase().includes('allocation') || stepTitle.toLowerCase().includes('why this works')) icon = '📈';
-        if (stepTitle.toLowerCase().includes('action') || stepTitle.toLowerCase().includes('what to do') || stepTitle.toLowerCase().includes('now')) {
-          icon = '🎯';
-          currentSection = { icon, title: `Step ${stepNum}: ${stepTitle}`, items: [], isAction: true };
-          return;
-        }
-        
-        // Plan mode: shorter titles
-        const displayTitle = parseMode === 'plan' && stepTitle.length > 30 
-          ? stepTitle.substring(0, 30) + '...' 
-          : `Step ${stepNum}: ${stepTitle}`;
-        
-        currentSection = { icon, title: displayTitle, items: [] };
-        return;
-      }
-
-      // Detect allocation category start (Growth, Stability, Protection)
-      const allocStartMatch = trimmed.match(/^(Growth|Stability|Protection|Gold)[\s(]*(Equity|Debt)?[\s)]*,?\s*(.*)/i);
-      if (allocStartMatch) {
-        flushAllocation();
-        const category = allocStartMatch[1];
-        const type = allocStartMatch[2] || '';
-        const remainder = allocStartMatch[3];
-        
-        const icon = category === 'Growth' || type === 'Equity' ? '📈' : 
-                     category === 'Stability' || type === 'Debt' ? '🛡️' : 
-                     category === 'Protection' || category === 'Gold' ? '✨' : '💰';
-        
-        currentAllocation = { 
-          category: type ? `${category} (${type})` : category, 
-          icon, 
-          return: '', 
-          funds: [], 
-          purpose: '' 
-        };
-        
-        // Check if remainder has return percentage
-        const returnMatch = remainder.match(/(~?\d{1,2}%[-–]?\d?\d?%?)/);
-        if (returnMatch) {
-          currentAllocation.return = returnMatch[1];
-        }
-        return;
-      }
-
-      // Detect return percentage (for allocations)
-      const returnOnlyMatch = trimmed.match(/^(~?\d{1,2}%[-–]?\d?\d?%?)$/);
-      if (returnOnlyMatch && currentAllocation) {
-        currentAllocation.return = returnOnlyMatch[1];
-        return;
-      }
-
-      // Detect fund names
-      const fundMatch = trimmed.match(/^(Nifty\s+\d+|Index\s+Fund|Debt\s+Fund|Gold\s+(?:ETF|Fund)|Short\s+[Dd]uration|Banking\s+&\s+PSU|Gold\s+mutual\s+fund)/i);
-      if (fundMatch && currentAllocation) {
-        currentAllocation.funds.push(trimmed.replace(/,$/, ''));
-        return;
-      }
-
-      // Detect purpose/description for allocations
-      const purposeMatch = trimmed.match(/^(Main\s+driver|Reduces\s+ups|Hedge\s+against|Reduces|Main\s+driver\s+to\s+beat)/i);
-      if (purposeMatch && currentAllocation) {
-        currentAllocation.purpose = trimmed;
-        flushAllocation();
-        return;
-      }
-
-      // Detect Allocation summary line
-      const allocSummaryMatch = trimmed.match(/^(🏦\s*)?Allocation:\s*(.+)/i);
-      if (allocSummaryMatch) {
-        flushAllocation();
-        if (currentSection) sections.push(currentSection);
-        currentSection = { icon: '📊', title: 'Portfolio Allocation', items: [{ text: `📊 ${allocSummaryMatch[2]}`, isParagraph: true }] };
-        return;
-      }
-
-      // Detect Time horizon
-      const timeMatch = trimmed.match(/^(Time\s+horizon):\s*(.+)/i);
-      if (timeMatch && currentSection) {
-        currentSection.items.push({ text: `⏱️ ${timeMatch[1]}: ${timeMatch[2]}`, isParagraph: true });
-        return;
-      }
-
-      // Detect Expected return
-      const expReturnMatch = trimmed.match(/^(Expected\s+portfolio\s+return):\s*(.+)/i);
-      if (expReturnMatch && currentSection) {
-        currentSection.items.push({ text: `📈 ${expReturnMatch[1]}: ${expReturnMatch[2]}`, isParagraph: true });
-        return;
-      }
-
-      // Detect Inflation
-      const inflationMatch = trimmed.match(/^(India\s+inflation)/i);
-      if (inflationMatch && currentSection) {
-        currentSection.items.push({ text: `📉 ${trimmed}`, isParagraph: true });
-        return;
-      }
-
-      // Detect "Yes/No" beat inflation statements
-      const beatInflationMatch = trimmed.match(/^(Yes[—–]|No[—–])/i);
-      if (beatInflationMatch) {
-        flushAllocation();
-        if (!currentSection) currentSection = { icon: '💡', title: 'Analysis', items: [] };
-        currentSection.items.push({ text: `✅ ${trimmed}`, isParagraph: true });
-        return;
-      }
-
-      // Detect amounts with descriptions (₹60,000 aligned, ₹45,000 equity...)
-      const amountDescMatch = trimmed.match(/^(₹[\d,.]+(?:\s*-\s*₹?[\d,.]+)?)\s*(.+)/);
-      if (amountDescMatch && currentSection) {
-        // Check if this looks like an allocation breakdown
-        if (trimmed.includes('equity') || trimmed.includes('debt') || trimmed.includes('gold')) {
-          currentSection.items.push({ text: `💰 ${trimmed}`, isParagraph: true });
-        } else {
-          currentSection.items.push({ text: `💰 ${trimmed}`, isParagraph: true });
-        }
-        return;
-      }
-
-      // Detect standalone amounts
-      const amountMatch = trimmed.match(/^(₹[\d,.]+)$/);
-      if (amountMatch && currentSection) {
-        currentSection.items.push({ text: `💰 ${trimmed}`, isParagraph: true });
-        return;
-      }
-
-      // Detect action plan items (Start SIP, Increase yearly, Emergency fund)
-      const actionMatch = trimmed.match(/^(Start\s+SIP|Increase\s+yearly|Emergency\s+fund|Index\s+funds)/i);
-      if (actionMatch && currentSection?.isAction) {
-        // Check if next segments give more details
-        currentSection.items.push({ text: `✓ ${trimmed}`, subItems: [] });
-        return;
-      }
-
-      // Detect numeric details for actions (₹60,000, 5-10%)
-      const detailMatch = trimmed.match(/^(₹[\d,.]+|(\d+-)?\d+%\s*hike|[\d.]+L\/month)/);
-      if (detailMatch && currentSection?.isAction && currentSection.items.length > 0) {
-        const lastItem = currentSection.items[currentSection.items.length - 1];
-        if (lastItem.subItems) {
-          lastItem.subItems.push(`→ ${trimmed}`);
-        }
-        return;
-      }
-
-      // Extract summary data for top card
-      const sipMatch = trimmed.match(/(?:monthly\s+surplus|plan).*?₹([\d,.]+)/i);
-      if (sipMatch && !summaryData.monthlySip) summaryData.monthlySip = sipMatch[1];
-      
-      const timelineExtract = trimmed.match(/(\d+)\s*years?/i);
-      if (timelineExtract && !summaryData.timeline) summaryData.timeline = timelineExtract[1] + ' years';
-
-      // General paragraph content
-      if (currentSection) {
-        flushAllocation();
-        currentSection.items.push({ text: trimmed, isParagraph: true });
-      } else {
-        flushAllocation();
-        currentSection = { icon: '📝', title: 'Details', items: [{ text: trimmed, isParagraph: true }] };
-      }
-    });
-
-    flushAllocation();
-    if (currentSection) sections.push(currentSection);
-    
-    return { sections, summaryData };
-  };
-
-  const { sections, summaryData } = parseContent(text, mode);
-
-  // Highlight numbers in text
-  const highlightNumbers = (str: string) => {
-    return str.split(/([₹Rs.]?\s*[\d,.]+\s*(?:lakh|crore|k)?|[₹Rs.]?\s*[\d,]+(?:\s*-\s*[₹Rs.]?\s*[\d,]+)?|~?\d{1,2}%|\d{1,2}-\d{1,2}%)/gi).map((part, idx) => {
-      const isNumber = part.match(/[₹Rs.]?\s*[\d,.]+|~?\d{1,2}%|\d{1,2}-\d{1,2}%/);
-      return isNumber ? (
-        <span key={idx} className="bg-gradient-to-r from-[#2b5cff] to-[#7c3aed] bg-clip-text font-bold text-transparent">
-          {part}
-        </span>
-      ) : part;
-    });
-  };
-
-  return (
-    <div className="space-y-4">
-      {/* Summary Card - Expert Advisory (only in chat mode) */}
-      {mode === 'chat' && (summaryData.advisory || summaryData.goal || summaryData.timeline || summaryData.monthlySip) && (
-        <motion.div
-          initial={{ opacity: 0, y: 15 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="rounded-2xl border border-[#2b5cff]/20 bg-gradient-to-br from-[#2b5cff]/10 via-[#7c3aed]/5 to-white p-4 shadow-[0_4px_20px_rgba(43,92,255,0.1)]"
-        >
-          <div className="mb-3 flex items-center gap-2">
-            <div className="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-[#2b5cff] to-[#7c3aed] text-lg text-white">
-              🎯
-            </div>
-            <h4 className="text-sm font-bold text-[#0a1930]">Expert Advisory</h4>
-          </div>
-          
-          {/* Main advisory text with split breakdown */}
-          {summaryData.advisory ? (
-            <p className="text-sm leading-relaxed text-[#1d355d]">
-              {highlightNumbers(summaryData.advisory)}
-            </p>
-          ) : (
-            <div className="grid grid-cols-2 gap-3">
-              {summaryData.goal && (
-                <div className="rounded-xl bg-white/60 p-3">
-                  <p className="text-xs text-[#64748b]">Goal</p>
-                  <p className="text-sm font-bold text-[#0a1930]">{highlightNumbers('₹' + summaryData.goal)}</p>
-                </div>
-              )}
-              {summaryData.timeline && (
-                <div className="rounded-xl bg-white/60 p-3">
-                  <p className="text-xs text-[#64748b]">Timeline</p>
-                  <p className="text-sm font-bold text-[#0a1930]">{summaryData.timeline}</p>
-                </div>
-              )}
-              {summaryData.monthlySip && (
-                <div className="col-span-2 rounded-xl border border-[#2b5cff]/20 bg-gradient-to-r from-[#2b5cff]/10 to-[#7c3aed]/10 p-3">
-                  <p className="text-xs text-[#64748b]">Monthly SIP Needed</p>
-                  <p className="text-lg font-bold text-[#0a1930]">{highlightNumbers('₹' + summaryData.monthlySip.replace(/-/g, ' - ₹'))}</p>
-                </div>
-              )}
-            </div>
-          )}
-        </motion.div>
-      )}
-
-      {/* Plan Mode: Clean advisory text only */}
-      {mode === 'plan' && sections.length > 0 && (
-        <motion.div
-          initial={{ opacity: 0, y: 10 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="text-sm leading-relaxed text-[#1d355d]"
-        >
-          {sections.map((section, sIdx) => (
-            <div key={sIdx}>
-              {/* Plan mode: just the clean text, no section titles */}
-              {section.items.map((item, iIdx) => (
-                <span key={iIdx} className={iIdx > 0 ? 'ml-1' : ''}>
-                  {highlightNumbers(item.text)}
-                </span>
-              ))}
-            </div>
-          ))}
-        </motion.div>
-      )}
-
-      {/* Chat Mode: Card-based format */}
-      {mode === 'chat' && sections.map((section, sIdx) => (
-        <motion.div
-          key={sIdx}
-          initial={{ opacity: 0, y: 15 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: (sIdx + 1) * 0.08 }}
-          className={`rounded-2xl border p-4 shadow-[0_4px_16px_rgba(43,92,255,0.06)] ${
-            section.isAction 
-              ? 'border-[#10b981]/30 bg-gradient-to-br from-[#10b981]/10 via-[#059669]/5 to-white' 
-              : 'border-[#e1ebff] bg-gradient-to-br from-white to-[#f8fbff]'
-          }`}
-        >
-          {/* Section Header */}
-          <div className="mb-3 flex items-center gap-2">
-            <div className={`flex h-8 w-8 items-center justify-center rounded-full text-lg ${
-              section.isAction
-                ? 'bg-gradient-to-br from-[#10b981] to-[#059669] text-white'
-                : 'bg-gradient-to-br from-[#2b5cff]/10 to-[#7c3aed]/10'
-            }`}>
-              {section.icon}
-            </div>
-            <h4 className={`text-sm font-bold ${section.isAction ? 'text-[#059669]' : 'text-[#0a1930]'}`}>
-              {section.title}
-            </h4>
-          </div>
-          
-          {/* Section Items */}
-          <div className="space-y-3">
-            {section.items.map((item, iIdx) => (
-              <motion.div
-                key={iIdx}
-                initial={{ opacity: 0, x: -5 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ delay: sIdx * 0.08 + iIdx * 0.03 }}
-                className={`
-                  ${item.subItems ? '' : 'rounded-xl bg-gradient-to-r from-[#f0f7ff]/50 to-transparent p-3'}
-                  ${item.isParagraph && !item.subItems ? 'my-2' : ''}
-                `}
-              >
-                {/* Main item text */}
-                <p className={`text-sm leading-relaxed text-[#1d355d] ${item.isParagraph ? 'py-1' : ''}`}>
-                  {highlightNumbers(item.text)}
-                </p>
-                
-                {/* Sub-items (for allocations) */}
-                {item.subItems && item.subItems.length > 0 && (
-                  <div className="mt-3 space-y-2 border-l-2 border-[#2b5cff]/20 pl-3">
-                    {item.subItems.map((sub, subIdx) => (
-                      <p key={subIdx} className="text-xs leading-relaxed text-[#475569]">
-                        {highlightNumbers(sub)}
-                      </p>
-                    ))}
-                  </div>
-                )}
-              </motion.div>
-            ))}
-          </div>
-        </motion.div>
-      ))}
-    </div>
-  );
-}
 
 type MarketPulseItem = {
   label: string;
@@ -1797,27 +1363,6 @@ export default function DashboardPage() {
         .filter(Boolean)
         .join(" | ");
 
-      // Build rich financial context from profile
-      const financialContext = profile ? {
-        goal_amount_inr: profile.target_amount_inr,
-        horizon_years: profile.target_horizon_years,
-        risk_level: profile.risk_appetite,
-        monthly_income: profile.monthly_income_inr,
-        monthly_surplus: profile.monthly_investable_surplus_inr,
-        current_savings: profile.current_savings_inr,
-        emergency_months: profile.emergency_fund_months,
-        loss_tolerance: profile.loss_tolerance_pct,
-        plan_intro: aiAllocation?.intro,
-        sip_range: aiAllocation?.monthlySipRange,
-        next_action: aiAllocation?.nextAction,
-      } : { plan_intro: aiAllocation?.intro, sip_range: aiAllocation?.monthlySipRange, next_action: aiAllocation?.nextAction };
-
-      // Trim history to last 4 exchanges to avoid token bloat
-      const recentHistory = followUpThread.slice(0, 4).flatMap((item) => ([
-        { role: "user", content: item.question },
-        { role: "assistant", content: item.answer },
-      ]));
-
       const response = await fetch("/api/agent/chat", {
         method: "POST",
         headers: {
@@ -1825,20 +1370,16 @@ export default function DashboardPage() {
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          system: `You are Pravix, a personal finance assistant with strict guardrails.
-
-RULES:
-1. ALWAYS base answers on the user's financial plan context below.
-2. NEVER contradict the plan unless the user explicitly requests a deviation.
-3. Keep answers simple, short (2-3 sentences max), and actionable.
-4. If information is missing, say what's missing instead of guessing.
-5. Avoid generic advice - be specific to user's risk level, horizon, and income.
-6. If user asks something outside finance/plan scope, gently redirect to their plan.
-7. If user suggests something risky (crypto speculation, YOLO investing), warn them.
-8. When unsure, ask a clarifying question rather than hallucinating.`,
-          message: trimmedQuestion,
-          context: financialContext,
-          history: recentHistory,
+          message: `${trimmedQuestion}`,
+          history: followUpThread.flatMap((item) => {
+            const assistantContent = item.recommendation && item.reason
+              ? `${item.recommendation}\n\n${item.reason}${item.nextAction ? '\n\nNext step: ' + item.nextAction : ''}`
+              : item.answer;
+            return [
+              { role: "user" as const, content: item.question },
+              { role: "assistant" as const, content: assistantContent },
+            ];
+          }),
         }),
       });
 
@@ -1849,16 +1390,20 @@ RULES:
       }
 
       const answer = payload.reply ?? "I could not generate a reply right now. Please try again.";
-      const raw = payload.raw ?? answer;
+      const isSimple = payload.isSimpleAnswer ?? false;
+      const structured = payload.structured ?? {};
       setFollowUpThread((current) => [
+        ...current,
         {
           id: `${Date.now()}-${current.length}`,
           question: trimmedQuestion,
           answer,
-          raw,
-          isSimple: true,
+          isSimple,
+          recommendation: structured.recommendation ?? "",
+          reason: structured.reason ?? "",
+          nextAction: structured.nextAction ?? "",
+          intro: structured.intro ?? "",
         },
-        ...current,
       ]);
       setFollowUpQuestion("");
     } catch (submitError) {
@@ -2531,13 +2076,10 @@ RULES:
 
                 {!isAiAllocationLoading ? (
                   <>
-                    {aiAllocation?.intro || advisorSummary ? (
-                      <div className="mt-5 rounded-xl border border-[#e1ebff] bg-white/90 p-4">
-                        <FormattedResponse 
-                          text={aiAllocation?.intro || advisorSummary || ''} 
-                          mode="plan" 
-                        />
-                      </div>
+                    {aiAllocation?.intro ? (
+                      <p className="mt-5 rounded-xl border border-[#e1ebff] bg-white/90 px-4 py-3 text-sm leading-relaxed text-[#2b3f62]">
+                        {aiAllocation.intro}
+                      </p>
                     ) : null}
 
                     <div className="mt-4 grid gap-3 md:grid-cols-2">
@@ -2594,16 +2136,9 @@ RULES:
                           type="button"
                           onClick={() => void handleFollowUpSubmit()}
                           disabled={isFollowUpLoading}
-                          className="inline-flex h-10 items-center justify-center gap-2 rounded-full bg-[#2b5cff] px-4 text-sm font-semibold text-white transition hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-60"
+                          className="inline-flex h-10 items-center justify-center rounded-full bg-[#2b5cff] px-4 text-sm font-semibold text-white transition hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-60"
                         >
-                          {isFollowUpLoading ? (
-                            <>
-                              <LoadingSpinner className="h-4 w-4" />
-                              Answering...
-                            </>
-                          ) : (
-                            "Get Answer"
-                          )}
+                          {isFollowUpLoading ? "Answering..." : "Get Answer"}
                         </button>
                       </div>
 
@@ -2614,106 +2149,32 @@ RULES:
                       ) : null}
 
                       {followUpThread.length > 0 ? (
-                        <div className="mt-4 space-y-4">
+                        <div className="mt-3 space-y-2.5">
                           {followUpThread.map((item, index) => (
-                            <motion.div
-                              key={item.id}
-                              initial={{ opacity: 0, y: 20, scale: 0.95 }}
-                              animate={{ opacity: 1, y: 0, scale: 1 }}
-                              transition={{ duration: 0.5, delay: index * 0.1, ease: [0.23, 1, 0.32, 1] }}
-                              className="group relative overflow-hidden rounded-3xl border border-gradient-to-r from-[#2b5cff]/20 via-[#7c3aed]/20 to-[#ec4899]/20 bg-white shadow-[0_8px_32px_rgba(43,92,255,0.12)] backdrop-blur-xl"
-                            >
-                              {/* Animated gradient background */}
-                              <div className="absolute inset-0 bg-gradient-to-br from-[#f0f7ff] via-[#faf5ff] to-[#fdf2f8] opacity-50" />
-                              <motion.div
-                                className="absolute -right-20 -top-20 h-40 w-40 rounded-full bg-gradient-to-r from-[#2b5cff]/30 to-[#7c3aed]/30 blur-3xl"
-                                animate={{ scale: [1, 1.2, 1], rotate: [0, 90, 0] }}
-                                transition={{ duration: 8, repeat: Infinity, ease: "easeInOut" }}
-                              />
-                              
-                              <div className="relative p-6">
-                                {/* Question Header */}
-                                <div className="mb-4 flex items-start gap-4">
-                                  <motion.div
-                                    whileHover={{ scale: 1.1, rotate: 5 }}
-                                    className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-[#2b5cff] to-[#7c3aed] shadow-lg shadow-[#2b5cff]/25"
-                                  >
-                                    <MessageCircle className="h-6 w-6 text-white" />
-                                  </motion.div>
+                            item.isSimple ? (
+                              <div key={item.id} className="rounded-2xl border border-[#e1ebff] bg-gradient-to-br from-[#f8fbff] to-white px-5 py-4 shadow-[0_4px_16px_rgba(43,92,255,0.06)]">
+                                <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#5f7396]">Question {index + 1}</p>
+                                <p className="mt-1 text-sm font-medium leading-relaxed text-[#0a1930]">{item.question}</p>
+                                <div className="mt-3 flex items-start gap-3">
+                                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-finance-accent/10">
+                                    <svg className="h-4 w-4 text-finance-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                                    </svg>
+                                  </div>
                                   <div className="flex-1">
-                                    <div className="flex items-center gap-2">
-                                      <span className="rounded-full bg-gradient-to-r from-[#2b5cff]/10 to-[#7c3aed]/10 px-3 py-1 text-[11px] font-bold uppercase tracking-[0.2em] text-[#2b5cff]">
-                                        Question {followUpThread.length - index}
-                                      </span>
-                                      <motion.div
-                                        initial={{ width: 0 }}
-                                        animate={{ width: "auto" }}
-                                        className="h-px flex-1 bg-gradient-to-r from-[#2b5cff]/30 to-transparent"
-                                      />
-                                    </div>
-                                    <p className="mt-2 text-base font-semibold leading-relaxed text-[#0a1930]">
-                                      {item.question}
-                                    </p>
+                                    <p className="text-[10px] font-semibold uppercase tracking-wide text-finance-accent">Simple Answer</p>
+                                    <p className="mt-1 text-sm leading-relaxed text-[#1d355d] whitespace-pre-line">{item.answer}</p>
                                   </div>
-                                </div>
-
-                                {/* AI Response Section */}
-                                <div className="relative mt-6 rounded-2xl border border-[#e1ebff]/50 bg-gradient-to-br from-white to-[#f8fbff] p-5 shadow-[0_4px_20px_rgba(43,92,255,0.06)]">
-                                  {/* AI Avatar and Header */}
-                                  <div className="mb-4 flex items-center gap-3">
-                                    <motion.div
-                                      whileHover={{ scale: 1.05 }}
-                                      className="flex h-10 w-10 items-center justify-center rounded-full bg-gradient-to-br from-[#10b981] via-[#2b5cff] to-[#7c3aed] p-[2px]"
-                                    >
-                                      <div className="flex h-full w-full items-center justify-center rounded-full bg-white">
-                                        <Bot className="h-5 w-5 text-[#2b5cff]" />
-                                      </div>
-                                    </motion.div>
-                                    <div>
-                                      <p className="text-sm font-bold text-[#0a1930]">Pravix AI Advisor</p>
-                                      <p className="text-[10px] text-[#5f7396]">Powered by GPT-5.3</p>
-                                    </div>
-                                    <motion.div
-                                      initial={{ opacity: 0, scale: 0 }}
-                                      animate={{ opacity: 1, scale: 1 }}
-                                      transition={{ delay: 0.3 }}
-                                      className="ml-auto"
-                                    >
-                                      <Sparkles className="h-5 w-5 text-[#f59e0b]" />
-                                    </motion.div>
-                                  </div>
-
-                                  {/* Response Content with enhanced formatting */}
-                                  <div className="relative">
-                                    <Quote className="absolute -left-2 -top-2 h-8 w-8 text-[#2b5cff]/10" />
-                                    <div className="prose prose-sm max-w-none pl-6">
-                                      <FormattedResponse text={item.answer ?? item.raw} mode="chat" />
-                                    </div>
-                                  </div>
-
-                                  {/* Action Buttons */}
-                                  <motion.div
-                                    initial={{ opacity: 0, y: 10 }}
-                                    animate={{ opacity: 1, y: 0 }}
-                                    transition={{ delay: 0.4 }}
-                                    className="mt-5 flex flex-wrap items-center gap-2"
-                                  >
-                                    <button className="inline-flex items-center gap-1.5 rounded-full bg-gradient-to-r from-[#2b5cff]/10 to-[#7c3aed]/10 px-3 py-1.5 text-xs font-medium text-[#2b5cff] transition hover:from-[#2b5cff]/20 hover:to-[#7c3aed]/20">
-                                      <Lightbulb className="h-3.5 w-3.5" />
-                                      Helpful
-                                    </button>
-                                    <button className="inline-flex items-center gap-1.5 rounded-full bg-gradient-to-r from-[#10b981]/10 to-[#059669]/10 px-3 py-1.5 text-xs font-medium text-[#059669] transition hover:from-[#10b981]/20 hover:to-[#059669]/20">
-                                      <CheckCircle2 className="h-3.5 w-3.5" />
-                                      Applied
-                                    </button>
-                                    <button className="inline-flex items-center gap-1.5 rounded-full bg-gradient-to-r from-[#f59e0b]/10 to-[#d97706]/10 px-3 py-1.5 text-xs font-medium text-[#d97706] transition hover:from-[#f59e0b]/20 hover:to-[#d97706]/20">
-                                      <Zap className="h-3.5 w-3.5" />
-                                      Insightful
-                                    </button>
-                                  </motion.div>
                                 </div>
                               </div>
-                            </motion.div>
+                            ) : (
+                              <div key={item.id} className="rounded-xl border border-[#e1ebff] bg-[#f8fbff] px-3.5 py-3">
+                                <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#5f7396]">Question {index + 1}</p>
+                                <p className="mt-1 text-sm font-medium leading-relaxed text-[#0a1930]">{item.question}</p>
+                                <p className="mt-2 text-[11px] font-bold uppercase tracking-[0.14em] text-[#5f7396]">Simple Answer</p>
+                                <p className="mt-1.5 whitespace-pre-line text-sm leading-relaxed text-[#1d355d]">{item.answer}</p>
+                              </div>
+                            )
                           ))}
                         </div>
                       ) : null}
@@ -2912,70 +2373,72 @@ RULES:
                       </div>
                     </div>
 
-                    <div className="mt-6 h-[320px] rounded-[2rem] border border-finance-border bg-[#fcfdff] p-6 shadow-[inset_0_1px_4px_rgba(10,25,48,0.04)]">
-                       <ResponsiveContainer width="100%" height="100%">
-                         <AreaChart data={corpusProjection.graphData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                           <defs>
-                            <linearGradient id="profitGradient" x1="0" y1="0" x2="0" y2="1">
-                              <stop offset="5%" stopColor="#2b5cff" stopOpacity={0.25}/>
-                              <stop offset="95%" stopColor="#2b5cff" stopOpacity={0.05}/>
-                            </linearGradient>
-                            <linearGradient id="investedGradient" x1="0" y1="0" x2="0" y2="1">
-                              <stop offset="5%" stopColor="#94a3b8" stopOpacity={0.15}/>
-                              <stop offset="95%" stopColor="#94a3b8" stopOpacity={0.02}/>
-                            </linearGradient>
-                           </defs>
-                           <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(10,25,48,0.06)" />
-                           <XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fill: "#5f7396", fontSize: 10 }} />
-                           <YAxis hide />
-                           <Tooltip 
-                            content={({ active, payload }) => {
-                              if (active && payload && payload.length) {
-                                const data = payload[0].payload;
-                                return (
-                                  <div className="rounded-xl border border-[#d8e7ff] bg-white p-3 shadow-xl">
-                                    <p className="text-[10px] font-bold uppercase tracking-widest text-[#5f7396]">{data.label}</p>
-                                    <div className="mt-2 space-y-1">
-                                      <div className="flex items-center justify-between gap-6">
-                                        <p className="text-xs text-[#5f7396]">Total Value</p>
-                                        <p className="text-sm font-bold text-[#0a1930]">{formatCurrency(data.totalValue)}</p>
-                                      </div>
-                                      <div className="flex items-center justify-between gap-6">
-                                        <p className="text-xs text-[#5f7396]">Invested</p>
-                                        <p className="text-sm font-semibold text-[#50607d]">{formatCurrency(data.invested)}</p>
-                                      </div>
-                                      <div className="flex items-center justify-between gap-6 border-t border-[#edf4ff] pt-1">
-                                        <p className="text-xs font-medium text-finance-accent">Net Profit</p>
-                                        <p className="text-sm font-bold text-finance-accent">+{formatCurrency(data.profit)}</p>
+                    <div className="mt-6 rounded-[2rem] border border-finance-border bg-[#fcfdff] p-6 shadow-[inset_0_1px_4px_rgba(10,25,48,0.04)]">
+                       <div className="h-[280px] w-full">
+                         <ResponsiveContainer width="100%" height="100%">
+                           <AreaChart data={corpusProjection.graphData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                             <defs>
+                              <linearGradient id="profitGradient" x1="0" y1="0" x2="0" y2="1">
+                                <stop offset="5%" stopColor="#2b5cff" stopOpacity={0.25}/>
+                                <stop offset="95%" stopColor="#2b5cff" stopOpacity={0.05}/>
+                              </linearGradient>
+                              <linearGradient id="investedGradient" x1="0" y1="0" x2="0" y2="1">
+                                <stop offset="5%" stopColor="#94a3b8" stopOpacity={0.15}/>
+                                <stop offset="95%" stopColor="#94a3b8" stopOpacity={0.02}/>
+                              </linearGradient>
+                             </defs>
+                             <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(10,25,48,0.06)" />
+                             <XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fill: "#5f7396", fontSize: 10 }} />
+                             <YAxis hide />
+                             <Tooltip 
+                              content={({ active, payload }) => {
+                                if (active && payload && payload.length) {
+                                  const data = payload[0].payload;
+                                  return (
+                                    <div className="rounded-xl border border-[#d8e7ff] bg-white p-3 shadow-xl">
+                                      <p className="text-[10px] font-bold uppercase tracking-widest text-[#5f7396]">{data.label}</p>
+                                      <div className="mt-2 space-y-1">
+                                        <div className="flex items-center justify-between gap-6">
+                                          <p className="text-xs text-[#5f7396]">Total Value</p>
+                                          <p className="text-sm font-bold text-[#0a1930]">{formatCurrency(data.totalValue)}</p>
+                                        </div>
+                                        <div className="flex items-center justify-between gap-6">
+                                          <p className="text-xs text-[#5f7396]">Invested</p>
+                                          <p className="text-sm font-semibold text-[#50607d]">{formatCurrency(data.invested)}</p>
+                                        </div>
+                                        <div className="flex items-center justify-between gap-6 border-t border-[#edf4ff] pt-1">
+                                          <p className="text-xs font-medium text-finance-accent">Net Profit</p>
+                                          <p className="text-sm font-bold text-finance-accent">+{formatCurrency(data.profit)}</p>
+                                        </div>
                                       </div>
                                     </div>
-                                  </div>
-                                );
-                              }
-                              return null;
-                            }}
-                           />
-                          <Area 
-                            type="monotone" 
-                            dataKey="totalValue" 
-                            stackId="1"
-                            stroke="#2b5cff" 
-                            strokeWidth={3} 
-                            fillOpacity={1} 
-                            fill="url(#profitGradient)" 
-                          />
-                          <Area 
-                            type="monotone" 
-                            dataKey="invested" 
-                            stackId="2"
-                            stroke="#94a3b8" 
-                            strokeWidth={1.5} 
-                            strokeDasharray="4 4"
-                            fill="url(#investedGradient)" 
-                          />
-                         </AreaChart>
-                       </ResponsiveContainer>
-                      <div className="mt-4 flex items-center justify-center gap-6">
+                                  );
+                                }
+                                return null;
+                              }}
+                             />
+                            <Area 
+                              type="monotone" 
+                              dataKey="totalValue" 
+                              stackId="1"
+                              stroke="#2b5cff" 
+                              strokeWidth={3} 
+                              fillOpacity={1} 
+                              fill="url(#profitGradient)" 
+                            />
+                            <Area 
+                              type="monotone" 
+                              dataKey="invested" 
+                              stackId="2"
+                              stroke="#94a3b8" 
+                              strokeWidth={1.5} 
+                              strokeDasharray="4 4"
+                              fill="url(#investedGradient)" 
+                            />
+                           </AreaChart>
+                         </ResponsiveContainer>
+                       </div>
+                      <div className="mt-8 flex items-center justify-center gap-6 border-t border-[#edf4ff] pt-5">
                         <div className="flex items-center gap-2">
                           <div className="h-2 w-2 rounded-full bg-finance-accent" />
                           <p className="text-[10px] font-bold uppercase tracking-widest text-finance-muted">Total Value (Compounded)</p>

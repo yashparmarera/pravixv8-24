@@ -1,13 +1,13 @@
 import type { AgentChatHistoryItem, AgentContext, AgentStructuredAdvice } from "@/lib/agent/types";
 
-type NimRole = "system" | "user" | "assistant";
+type ChatRole = "system" | "user" | "assistant";
 
-type NimMessage = {
-  role: NimRole;
+type ChatMessage = {
+  role: ChatRole;
   content: string;
 };
 
-type NimChatCompletionsResponse = {
+type ChatCompletionsResponse = {
   choices?: Array<{
     message?: {
       content?:
@@ -19,43 +19,6 @@ type NimChatCompletionsResponse = {
     };
   }>;
 };
-
-type DeepSeekChatCompletionsResponse = {
-  choices?: Array<{
-    message?: {
-      content?:
-        | string
-        | Array<{
-            type?: string;
-            text?: string;
-          }>;
-    };
-  }>;
-};
-
-class NimApiError extends Error {
-  status: number;
-  retryAfterMs: number | null;
-
-  constructor(status: number, bodyPreview: string, retryAfterMs: number | null) {
-    super(`NVIDIA NIM API error (${status}): ${bodyPreview}`);
-    this.name = "NimApiError";
-    this.status = status;
-    this.retryAfterMs = retryAfterMs;
-  }
-}
-
-class DeepSeekApiError extends Error {
-  status: number;
-  retryAfterMs: number | null;
-
-  constructor(status: number, bodyPreview: string, retryAfterMs: number | null) {
-    super(`DeepSeek API error (${status}): ${bodyPreview}`);
-    this.name = "DeepSeekApiError";
-    this.status = status;
-    this.retryAfterMs = retryAfterMs;
-  }
-}
 
 class OpenRouterApiError extends Error {
   status: number;
@@ -69,15 +32,8 @@ class OpenRouterApiError extends Error {
   }
 }
 
-class ProviderQualityError extends Error {
-  provider: "NIM" | "DeepSeek" | "OpenRouter";
-
-  constructor(provider: "NIM" | "DeepSeek" | "OpenRouter", reason: string) {
-    super(`${provider} quality gate failed: ${reason}`);
-    this.name = "ProviderQualityError";
-    this.provider = provider;
-  }
-}
+const OPENROUTER_MODEL = "openai/gpt-5.3-chat";
+const OPENROUTER_API_KEY = "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";
 
 type AllocationPlan = {
   equityPct: number;
@@ -89,6 +45,7 @@ type AllocationPlan = {
 
 type AdvisorChatReply = {
   reply: string;
+  raw: string;
   structured: AgentStructuredAdvice;
 };
 
@@ -114,7 +71,7 @@ const CIRCUIT_RATE_LIMIT_THRESHOLD = 0.3;
 const CIRCUIT_CONSECUTIVE_FAILURES = 5;
 const CIRCUIT_HALF_OPEN_PROBE_TARGET = 2;
 
-type ProviderName = "nim" | "deepseek" | "openrouter";
+type ProviderName = "openrouter";
 type CircuitMode = "closed" | "open" | "half-open";
 
 type ProviderCircuit = {
@@ -148,62 +105,10 @@ function createProviderCircuit(): ProviderCircuit {
 }
 
 const providerCircuits: Record<ProviderName, ProviderCircuit> = {
-  nim: createProviderCircuit(),
-  deepseek: createProviderCircuit(),
   openrouter: createProviderCircuit(),
 };
 
-function getNimApiKey() {
-  const key = process.env.NVIDIA_NIM_API_KEY ?? process.env.NIM_API_KEY;
-  if (!key) {
-    throw new Error("Missing NVIDIA_NIM_API_KEY environment variable.");
-  }
-
-  return key;
-}
-
-function getNimModel() {
-  return process.env.NVIDIA_NIM_MODEL ?? "meta/llama-3.1-8b-instruct";
-}
-
-function getDeepSeekApiKey() {
-  const key = process.env.DEEPSEEK_API_KEY;
-  if (!key) {
-    throw new Error("Missing DEEPSEEK_API_KEY environment variable.");
-  }
-
-  return key;
-}
-
-function getDeepSeekModel() {
-  return process.env.DEEPSEEK_MODEL ?? "deepseek-chat";
-}
-
-function getOpenRouterApiKey() {
-  const key = process.env.OPENROUTER_API_KEY;
-  if (!key) {
-    throw new Error("Missing OPENROUTER_API_KEY environment variable.");
-  }
-
-  return key;
-}
-
-function getOpenRouterModel() {
-  return process.env.OPENROUTER_MODEL ?? "openai/gpt-4o-mini";
-}
-
-function getNimTimeoutMs() {
-  const raw = process.env.NVIDIA_NIM_TIMEOUT_MS ?? process.env.NIM_TIMEOUT_MS;
-  const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
-
-  if (!Number.isFinite(parsed)) {
-    return 15_000;
-  }
-
-  return Math.min(Math.max(parsed, 3_000), 60_000);
-}
-
-function toNimRole(role: AgentChatHistoryItem["role"]): NimRole {
+function toChatRole(role: AgentChatHistoryItem["role"]): ChatRole {
   return role === "assistant" ? "assistant" : "user";
 }
 
@@ -1235,7 +1140,7 @@ function extractRetrySeconds(message: string): string | null {
   return `${Math.ceil(retry)}s`;
 }
 
-function summarizeNimErrorBody(raw: string): string {
+function summarizeErrorBody(raw: string): string {
   const withoutTags = raw.replace(/<[^>]+>/g, " ");
   const compact = withoutTags.replace(/\s+/g, " ").trim();
 
@@ -1270,7 +1175,7 @@ function isRetryableStatus(status: number): boolean {
 }
 
 function isRetryableProviderError(error: unknown): boolean {
-  if (error instanceof NimApiError || error instanceof DeepSeekApiError || error instanceof OpenRouterApiError) {
+  if (error instanceof OpenRouterApiError) {
     return isRetryableStatus(error.status);
   }
 
@@ -1289,7 +1194,7 @@ function isRetryableProviderError(error: unknown): boolean {
 }
 
 function getRetryAfterFromError(error: unknown): number | null {
-  if (error instanceof NimApiError || error instanceof DeepSeekApiError || error instanceof OpenRouterApiError) {
+  if (error instanceof OpenRouterApiError) {
     return error.retryAfterMs;
   }
 
@@ -1359,7 +1264,7 @@ function openCircuit(circuit: ProviderCircuit, now: number) {
 }
 
 function getProviderErrorStatus(error: unknown): number | null {
-  if (error instanceof NimApiError || error instanceof DeepSeekApiError || error instanceof OpenRouterApiError) {
+  if (error instanceof OpenRouterApiError) {
     return error.status;
   }
 
@@ -1450,16 +1355,12 @@ function recordProviderFailure(provider: ProviderName, error: unknown, retryable
   }
 }
 
-function isNimCapacityError(error: unknown): boolean {
+function isOpenRouterCapacityError(error: unknown): boolean {
   if (error instanceof ProviderCircuitOpenError) {
     return true;
   }
 
-  if (error instanceof ProviderQualityError) {
-    return true;
-  }
-
-  if (error instanceof NimApiError || error instanceof DeepSeekApiError || error instanceof OpenRouterApiError) {
+  if (error instanceof OpenRouterApiError) {
     return isRetryableStatus(error.status) || error.status === 401;
   }
 
@@ -1469,15 +1370,9 @@ function isNimCapacityError(error: unknown): boolean {
 
   const message = error.message.toLowerCase();
   return (
-    message.includes("nvidia nim api error (429)") ||
-    message.includes("nvidia nim api error (401)") ||
-    message.includes("nvidia nim api error (5") ||
     message.includes("openrouter api error (429)") ||
     message.includes("openrouter api error (401)") ||
     message.includes("openrouter api error (5") ||
-    message.includes("deepseek api error (429)") ||
-    message.includes("deepseek api error (401)") ||
-    message.includes("deepseek api error (5") ||
     message.includes("bad gateway") ||
     message.includes("gateway timeout") ||
     message.includes("temporarily unavailable") ||
@@ -1487,26 +1382,14 @@ function isNimCapacityError(error: unknown): boolean {
     message.includes("resource_exhausted") ||
     message.includes("quota") ||
     message.includes("rate limit") ||
-    message.includes("missing nvidia_nim_api_key") ||
-    message.includes("missing nim_api_key") ||
-    message.includes("missing deepseek_api_key") ||
-    message.includes("missing openrouter_api_key") ||
-    message.includes("quality gate failed")
+    message.includes("missing openrouter_api_key")
   );
 }
 
-function inferProviderFromErrorReason(reason: string): "OpenRouter" | "NIM" | "DeepSeek" | "provider" {
+function inferProviderFromErrorReason(reason: string): "OpenRouter" | "provider" {
   const normalized = reason.toLowerCase();
   if (normalized.includes("openrouter")) {
     return "OpenRouter";
-  }
-
-  if (normalized.includes("nvidia") || normalized.includes("nim")) {
-    return "NIM";
-  }
-
-  if (normalized.includes("deepseek")) {
-    return "DeepSeek";
   }
 
   return "provider";
@@ -1593,7 +1476,7 @@ function buildFallbackDashboardActionPlan(context: AgentContext, reason: string)
   }
 
   const cautionLines = [
-    `CAUTION: AI model is temporarily unavailable due to NVIDIA NIM limits/availability${retryIn ? ` (retry after ~${retryIn})` : ""}.`,
+    `CAUTION: AI model is temporarily unavailable due to OpenRouter limits/availability${retryIn ? ` (retry after ~${retryIn})` : ""}.`,
     "This is a rules-based fallback summary; verify suitability before execution.",
     `Risk note: ${plan.note}`,
   ];
@@ -2024,147 +1907,12 @@ export function buildContextBlock(context: AgentContext): string {
   );
 }
 
-async function callNim(
-  messages: NimMessage[],
-  generationConfig: { temperature: number; maxOutputTokens: number },
-  timeoutMs: number,
-): Promise<string> {
-  const apiKey = getNimApiKey();
-  const effectiveTimeoutMs = timeoutMs > 0 ? timeoutMs : getNimTimeoutMs();
-  const abortController = new AbortController();
-  const timeoutId = setTimeout(() => abortController.abort(), effectiveTimeoutMs);
-
-  let response: Response;
-
-  try {
-    response = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: getNimModel(),
-        messages,
-        temperature: generationConfig.temperature,
-        max_tokens: generationConfig.maxOutputTokens,
-        top_p: 0.9,
-      }),
-      signal: abortController.signal,
-    });
-  } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      throw new Error(`NVIDIA NIM API timeout after ${effectiveTimeoutMs}ms.`);
-    }
-
-    throw error;
-  } finally {
-    clearTimeout(timeoutId);
-  }
-
-  const rawBody = await response.text();
-
-  if (!response.ok) {
-    const retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
-    throw new NimApiError(response.status, summarizeNimErrorBody(rawBody), retryAfterMs);
-  }
-
-  let data: NimChatCompletionsResponse;
-
-  try {
-    data = JSON.parse(rawBody) as NimChatCompletionsResponse;
-  } catch {
-    throw new Error("NVIDIA NIM returned a malformed JSON payload.");
-  }
-
-  const content = data.choices?.[0]?.message?.content;
-  const text =
-    typeof content === "string"
-      ? content.trim()
-      : Array.isArray(content)
-        ? content.map((part) => part.text ?? "").join("\n").trim()
-        : "";
-
-  if (!text) {
-    throw new Error("NVIDIA NIM returned an empty response.");
-  }
-
-  return text;
-}
-
-async function callDeepSeek(
-  messages: NimMessage[],
-  generationConfig: { temperature: number; maxOutputTokens: number },
-  timeoutMs: number,
-): Promise<string> {
-  const apiKey = getDeepSeekApiKey();
-  const abortController = new AbortController();
-  const timeoutId = setTimeout(() => abortController.abort(), timeoutMs);
-
-  let response: Response;
-
-  try {
-    response = await fetch("https://api.deepseek.com/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: getDeepSeekModel(),
-        messages,
-        temperature: generationConfig.temperature,
-        max_tokens: generationConfig.maxOutputTokens,
-        top_p: 0.9,
-      }),
-      signal: abortController.signal,
-    });
-  } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      throw new Error(`DeepSeek API timeout after ${timeoutMs}ms.`);
-    }
-
-    throw error;
-  } finally {
-    clearTimeout(timeoutId);
-  }
-
-  const rawBody = await response.text();
-
-  if (!response.ok) {
-    const retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
-    throw new DeepSeekApiError(response.status, summarizeNimErrorBody(rawBody), retryAfterMs);
-  }
-
-  let data: DeepSeekChatCompletionsResponse;
-
-  try {
-    data = JSON.parse(rawBody) as DeepSeekChatCompletionsResponse;
-  } catch {
-    throw new Error("DeepSeek returned a malformed JSON payload.");
-  }
-
-  const content = data.choices?.[0]?.message?.content;
-  const text =
-    typeof content === "string"
-      ? content.trim()
-      : Array.isArray(content)
-        ? content.map((part) => part.text ?? "").join("\n").trim()
-        : "";
-
-  if (!text) {
-    throw new Error("DeepSeek returned an empty response.");
-  }
-
-  return text;
-}
-
 async function callOpenRouter(
-  messages: NimMessage[],
+  messages: ChatMessage[],
   generationConfig: { temperature: number; maxOutputTokens: number },
   timeoutMs: number,
 ): Promise<string> {
-  const apiKey = getOpenRouterApiKey();
+  const apiKey = "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";
   const abortController = new AbortController();
   const timeoutId = setTimeout(() => abortController.abort(), timeoutMs);
 
@@ -2178,7 +1926,7 @@ async function callOpenRouter(
         Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        model: getOpenRouterModel(),
+        model: "openai/gpt-5.3-chat",
         messages,
         temperature: generationConfig.temperature,
         max_tokens: generationConfig.maxOutputTokens,
@@ -2200,13 +1948,13 @@ async function callOpenRouter(
 
   if (!response.ok) {
     const retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
-    throw new OpenRouterApiError(response.status, summarizeNimErrorBody(rawBody), retryAfterMs);
+    throw new OpenRouterApiError(response.status, summarizeErrorBody(rawBody), retryAfterMs);
   }
 
-  let data: NimChatCompletionsResponse;
+  let data: ChatCompletionsResponse;
 
   try {
-    data = JSON.parse(rawBody) as NimChatCompletionsResponse;
+    data = JSON.parse(rawBody) as ChatCompletionsResponse;
   } catch {
     throw new Error("OpenRouter returned a malformed JSON payload.");
   }
@@ -2271,98 +2019,156 @@ export async function generateAdvisorChatReply(input: {
   message: string;
   history: AgentChatHistoryItem[];
   context: AgentContext;
+  systemPrompt?: string;
+  financialContext?: {
+    goal_amount_inr?: number;
+    horizon_years?: number;
+    risk_level?: string;
+    monthly_income?: number;
+    monthly_surplus?: number;
+    current_savings?: number;
+    emergency_months?: number;
+    loss_tolerance?: number | null;
+    plan_intro?: string;
+    sip_range?: string;
+    next_action?: string;
+  };
 }): Promise<AdvisorChatReply> {
   if (isSexualOrNonFinancialPrompt(input.message)) {
     const structured = buildOutOfScopeStructuredAdvice();
     return {
       reply: "Sorry, I can't assist with that.",
+      raw: "Sorry, I can't assist with that.",
       structured,
     };
   }
 
   const history = trimHistory(input.history);
 
-  const messages: NimMessage[] = [
-    { role: "system", content: buildSystemInstruction("chat") },
+  // Build enhanced context from financialContext if provided
+  let contextBlock = buildContextBlock(input.context);
+  if (input.financialContext) {
+    const fc = input.financialContext;
+    const enrichedContext = [
+      "=== USER FINANCIAL PROFILE ===",
+      fc.plan_intro ? `Profile: ${fc.plan_intro}` : null,
+      fc.goal_amount_inr ? `Goal: ₹${fc.goal_amount_inr.toLocaleString()}` : null,
+      fc.horizon_years ? `Time Horizon: ${fc.horizon_years} years` : null,
+      fc.risk_level ? `Risk Level: ${fc.risk_level}` : null,
+      fc.monthly_income ? `Monthly Income: ₹${fc.monthly_income.toLocaleString()}` : null,
+      fc.monthly_surplus ? `Investable Surplus: ₹${fc.monthly_surplus.toLocaleString()}` : null,
+      fc.current_savings ? `Current Savings: ₹${fc.current_savings.toLocaleString()}` : null,
+      fc.emergency_months ? `Emergency Fund: ${fc.emergency_months} months` : null,
+      fc.loss_tolerance ? `Loss Tolerance: ${fc.loss_tolerance}%` : null,
+      "",
+      "=== CURRENT PLAN ===",
+      fc.sip_range ? `Monthly SIP: ${fc.sip_range}` : null,
+      fc.next_action ? `Next Step: ${fc.next_action}` : null,
+      "",
+      "=== INSTRUCTIONS ===",
+      "Base your answer strictly on this user's specific financial data.",
+      "Do NOT provide generic advice that ignores their income, goal, or risk level.",
+    ].filter(Boolean).join("\n");
+    contextBlock = enrichedContext;
+  }
+
+  // Use strict structured system prompt
+  const systemContent = buildChatSystemInstruction();
+
+  const messages: ChatMessage[] = [
+    { role: "system", content: systemContent },
     ...history.map((item) => ({
-      role: toNimRole(item.role),
+      role: toChatRole(item.role),
       content: item.content,
     })),
     {
       role: "user",
       content: [
-        "User financial context:",
-        buildContextBlock(input.context),
-        "User question:",
+        "=== USER FINANCIAL CONTEXT ===",
+        contextBlock,
+        "",
+        "=== USER QUESTION ===",
         input.message,
-        "Use personalizationAnchor and onboardingProfile to tailor the response for this exact user.",
-        "Treat onboardingAnswers as the source of truth for goal, horizon, capacity, income, risk, and investment background.",
-        "Reference at least two concrete data points from context (numbers or specific goals/risks).",
-        "Provide a clear, engaging response with 2-4 practical next steps.",
-      ].join("\n\n"),
+        "",
+        "REMEMBER: Return ONLY valid JSON with answer, action, reason, and follow_ups fields. No markdown, no extra text.",
+      ].join("\n"),
     },
   ];
 
   const deadlineAt = Date.now() + CHAT_REQUEST_DEADLINE_MS;
-  try {
+
+  async function tryGenerate(attemptNum: number): Promise<{ reply: string; raw: string; structured: AgentStructuredAdvice }> {
     const raw = await callProviderWithRetry({
       provider: "openrouter",
       attempt: (timeoutMs) =>
         callOpenRouter(
           messages,
           {
-            temperature: 0.35,
-            maxOutputTokens: 420,
+            temperature: 0.25, // Lower temp for more consistent JSON
+            maxOutputTokens: 2500, // Increased for 200+ word detailed responses
           },
           timeoutMs,
         ),
       preferredTimeoutMs: CHAT_PRIMARY_TIMEOUT_MS,
-      maxRetries: CHAT_PRIMARY_MAX_RETRIES,
+      maxRetries: attemptNum === 0 ? CHAT_PRIMARY_MAX_RETRIES : 0,
       deadlineAt,
     });
 
-    const strictStructured = parseStructuredAdviceStrict(raw);
-    if (!strictStructured) {
-      throw new ProviderQualityError("OpenRouter", "Response missing required structured fields.");
-    }
+    // Parse and validate structured output
+    const parsed = parseChatReplySchema(raw, input.financialContext);
 
-    const structured = enforceAdviceGuardrails({
-      advice: ensurePersonalizedAdvice(strictStructured, input.context),
-      context: input.context,
-      userMessage: input.message,
-    });
-    return {
-      reply: formatStructuredAdvice(structured),
-      structured,
-    };
-  } catch (error) {
-    if (isNimCapacityError(error)) {
-      const reason = normalizeErrorMessage(error);
-      const structured = enforceAdviceGuardrails({
-        advice: ensurePersonalizedAdvice(
-          buildFallbackChatStructuredAdvice({
-            message: input.message,
-            context: input.context,
-            reason,
-          }),
-          input.context,
-        ),
-        context: input.context,
-        userMessage: input.message,
-      });
+    if (parsed.valid && parsed.data) {
+      // Format for display: combine answer + action + reason
+      const displayText = [
+        parsed.data.answer,
+        parsed.data.reason,
+        `Next step: ${parsed.data.action}`,
+      ].filter(Boolean).join(" ");
 
-      return {
-        reply: formatStructuredAdvice(structured),
-        structured,
+      // Convert to AgentStructuredAdvice format
+      const structured: AgentStructuredAdvice = {
+        recommendation: parsed.data.answer,
+        reason: parsed.data.reason,
+        riskWarning: "Returns are market-linked and not guaranteed.",
+        nextAction: parsed.data.action,
+        intro: parsed.data.answer,
+        step1Title: "RESPONSE",
+        assumptionBullets: parsed.data.follow_ups.slice(0, 2),
+        bestAssumption: parsed.data.follow_ups[2] || "Ask follow-up questions",
+        monthlySipRange: "Based on your plan",
+        monthlySipBreakdown: parsed.data.follow_ups,
+        step2Title: "FOLLOW-UP IDEAS",
+        portfolioBuckets: [],
+        step3Title: "NEXT STEPS",
+        actionPlanRows: [{ category: "Action", amount: "See above", whereToInvest: parsed.data.action }],
       };
+
+      return { reply: displayText, raw, structured };
     }
 
-    throw error;
+    // Retry with stronger prompt if first attempt failed
+    if (attemptNum === 0) {
+      messages.push({
+        role: "user",
+        content: "Your previous response was not valid JSON. Return ONLY valid JSON with answer, action, reason, follow_ups fields. No other text.",
+      });
+      return tryGenerate(1);
+    }
+    
+    throw new Error("Failed to generate valid structured response after retry");
+  }
+  
+  try {
+    return await tryGenerate(0);
+  } catch (primaryError) {
+    // Final fallback: generate simple text response
+    console.warn("[PRAVIX] Structured output failed, using fallback. Error:", primaryError);
+    return generateFallbackChatReply(input);
   }
 }
 
 export async function generateDashboardActionPlan(context: AgentContext): Promise<string> {
-  const messages: NimMessage[] = [
+  const messages: ChatMessage[] = [
     { role: "system", content: buildSystemInstruction("dashboard") },
     {
       role: "user",
@@ -2392,11 +2198,143 @@ export async function generateDashboardActionPlan(context: AgentContext): Promis
       deadlineAt,
     });
   } catch (error) {
-    if (isNimCapacityError(error)) {
+    if (isOpenRouterCapacityError(error)) {
       const reason = normalizeErrorMessage(error);
       return buildFallbackDashboardActionPlan(context, reason);
     }
-
     throw error;
+  }
+}
+
+// Helper: Build strict system prompt for chat replies
+function buildChatSystemInstruction(): string {
+  return `You are Pravix AI Wealth Advisor. Follow these rules EXACTLY:
+
+OUTPUT FORMAT (MUST BE VALID JSON):
+{
+  "answer": "Detailed 200+ word answer addressing user's question with depth, context, and relevance to their financial situation",
+  "action": "Clear, specific next step they can take right now",
+  "reason": "1 sentence explaining why this makes sense for THEIR situation",
+  "follow_ups": [
+    "Question 1 related to their plan?",
+    "Question 2 about risk/timeline?",
+    "Question 3 about increasing/adjusting?"
+  ]
+
+RULES:
+- answer MUST be at least 200 words, comprehensive and detailed
+- action MUST be specific and actionable
+- reason MUST reference their specific numbers/goals
+- follow_ups MUST be questions they might actually ask
+- NEVER give generic advice - always use their context
+- If suggesting changes, verify against their risk level and horizon
+- If information missing, say what's missing instead of guessing
+
+CONTEXT PROVIDED:
+- Goal amount and timeline
+- Risk level (conservative/moderate/aggressive)
+- Monthly income and investable surplus
+- Current plan details
+
+Base every answer strictly on this data. Do NOT contradict their plan.`;
+}
+
+// Helper: Fallback reply when structured output fails
+function generateFallbackChatReply(input: {
+  message: string;
+  history: AgentChatHistoryItem[];
+  context: AgentContext;
+  systemPrompt?: string;
+  financialContext?: Record<string, unknown>;
+}): AdvisorChatReply {
+  // Use existing fallback logic from buildFallbackChatStructuredAdvice
+  const fallbackStructured = buildFallbackChatStructuredAdvice({
+    message: input.message,
+    context: input.context,
+    reason: "Using fallback due to structured output failure",
+  });
+
+  return {
+    reply: `${fallbackStructured.recommendation} ${fallbackStructured.reason} Next step: ${fallbackStructured.nextAction}`,
+    raw: JSON.stringify(fallbackStructured),
+    structured: fallbackStructured,
+  };
+}
+
+// Helper: Parse and validate chat reply schema
+type ChatReplySchema = {
+  answer: string;
+  action: string;
+  reason: string;
+  follow_ups: string[];
+};
+
+function parseChatReplySchema(
+  raw: string,
+  financialContext?: Record<string, unknown>,
+): { valid: boolean; data?: ChatReplySchema } {
+  try {
+    // Try to extract JSON from markdown code blocks if present
+    const jsonMatch = raw.match(/```json\s*([\s\S]*?)```/) || raw.match(/```\s*([\s\S]*?)```/);
+    const jsonText = jsonMatch ? jsonMatch[1] : raw;
+
+    const parsed = JSON.parse(jsonText) as Partial<ChatReplySchema>;
+
+    // Validate required fields
+    if (!parsed.answer || typeof parsed.answer !== "string") {
+      return { valid: false };
+    }
+    if (!parsed.action || typeof parsed.action !== "string") {
+      return { valid: false };
+    }
+    if (!parsed.reason || typeof parsed.reason !== "string") {
+      return { valid: false };
+    }
+    if (!Array.isArray(parsed.follow_ups) || parsed.follow_ups.length === 0) {
+      return { valid: false };
+    }
+
+    // Validate minimum word count (200 words)
+    const wordCount = parsed.answer.trim().split(/\s+/).length;
+    if (wordCount < 200) {
+      console.warn(`[PRAVIX] Answer too short: ${wordCount} words, minimum 200 required`);
+      return { valid: false };
+    }
+
+    // Validate action is present and meaningful
+    if (parsed.action.length < 20) {
+      console.warn("[PRAVIX] Action too short, minimum 20 characters required");
+      return { valid: false };
+    }
+
+    // Check plan alignment if context provided
+    if (financialContext) {
+      const combined = (parsed.answer + " " + parsed.reason + " " + parsed.action).toLowerCase();
+
+      // Verify answer references user's specific data
+      const goal = financialContext.goal_amount_inr;
+      const horizon = financialContext.horizon_years;
+      const risk = financialContext.risk_level;
+
+      const hasContextReference =
+        (goal && combined.includes(String(goal).toLowerCase())) ||
+        (horizon && combined.includes(String(horizon).toLowerCase())) ||
+        (risk && combined.includes(String(risk).toLowerCase())) ||
+        combined.includes("₹") ||
+        combined.includes("your plan") ||
+        combined.includes("your goal");
+
+      if (!hasContextReference) {
+        console.warn("[PRAVIX] Response lacks context reference:", parsed.answer);
+      }
+    }
+
+    return {
+      valid: true,
+      data: parsed as ChatReplySchema,
+    };
+  } catch (error) {
+    console.warn("[PRAVIX] Failed to parse chat reply schema:", error);
+    return { valid: false };
   }
 }

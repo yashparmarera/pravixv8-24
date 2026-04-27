@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CalendarDays, Loader2, MessageCircle, PhoneCall, Send, Sparkles, X } from "lucide-react";
+import { CalendarDays, MessageCircle, PhoneCall, Send, Sparkles, X } from "lucide-react";
+import LoadingSpinner from "./LoadingSpinner";
 import { usePathname, useRouter } from "next/navigation";
 import { getSupabaseBrowserClient } from "@/lib/supabase/client";
 import type { AgentStructuredAdvice } from "@/lib/agent/types";
@@ -28,6 +29,7 @@ type ChatMessage = {
   content: string;
   sentAt: string;
   structured?: AgentStructuredAdvice;
+  loading?: boolean;
 };
 
 const CONTACT_PHONE_NUMBER = "+91 89369 82996";
@@ -191,6 +193,7 @@ export default function FloatingPravixChat({ signedIn, refreshKey }: FloatingPra
     };
 
     setMessages((previous) => [...previous, userMessage]);
+    setMessages((previous) => [...previous, { role: "assistant", content: "", sentAt: new Date().toISOString(), loading: true }]);
     setInput("");
 
     try {
@@ -217,17 +220,15 @@ export default function FloatingPravixChat({ signedIn, refreshKey }: FloatingPra
         throw new Error(payload.error ?? "Could not get a response from Pravix AI.");
       }
 
-      setMessages((previous) => [
-        ...previous,
-        {
-          role: "assistant",
-          content: payload.reply ?? "I could not generate a response right now.",
-          sentAt: new Date().toISOString(),
-          structured: payload.structured,
-        },
-      ]);
+      setMessages((previous) => previous.slice(0, -1).concat({
+        role: "assistant",
+        content: payload.reply ?? "I could not generate a response right now.",
+        sentAt: new Date().toISOString(),
+        structured: payload.structured,
+      }));
     } catch (chatError) {
       setError(chatError instanceof Error ? chatError.message : "Could not send message.");
+      setMessages((previous) => previous.slice(0, -1));
     } finally {
       setIsSending(false);
     }
@@ -280,8 +281,15 @@ export default function FloatingPravixChat({ signedIn, refreshKey }: FloatingPra
                             : "ml-auto max-w-[85%] bg-finance-accent text-white"
                         }`}
                       >
-                        <p className="whitespace-pre-wrap leading-relaxed">{message.content}</p>
-                        {message.role === "assistant" && message.structured ? (
+                        {message.loading ? (
+                          <div className="flex items-center gap-2">
+                            <LoadingSpinner className="h-3 w-3" />
+                            <span>Thinking...</span>
+                          </div>
+                        ) : (
+                          <p className="whitespace-pre-wrap leading-relaxed">{message.content}</p>
+                        )}
+                        {message.role === "assistant" && message.structured && !message.loading ? (
                           <div className="mt-2 rounded-lg border border-finance-border bg-white px-2.5 py-2 text-xs text-finance-text">
                             <p><span className="font-semibold">Next:</span> {message.structured.nextAction}</p>
                           </div>
@@ -330,7 +338,7 @@ export default function FloatingPravixChat({ signedIn, refreshKey }: FloatingPra
                     className="inline-flex h-10 w-10 items-center justify-center rounded-xl bg-finance-accent text-white transition-all duration-150 hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-70"
                     aria-label="Send message to Pravix AI"
                   >
-                    {isSending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                    {isSending ? <LoadingSpinner /> : <Send className="h-4 w-4" />}
                   </button>
                 </form>
               </>
@@ -427,7 +435,7 @@ export default function FloatingPravixChat({ signedIn, refreshKey }: FloatingPra
           >
             <span className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-white/15">
               {isBootstrapping ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
+                <LoadingSpinner />
               ) : (
                 <>
                   <Sparkles className="h-4 w-4 text-[#7af5ff] sm:hidden" />
